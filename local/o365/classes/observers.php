@@ -68,6 +68,7 @@ class observers {
      * @return bool Success/Failure.
      */
     public static function handle_oidc_user_connected(\auth_oidc\event\user_connected $event) {
+        global $DB;
         if (\local_o365\utils::is_configured() !== true) {
             return false;
         }
@@ -76,10 +77,48 @@ class observers {
         $eventdata = $event->get_data();
         if (!empty($eventdata['userid'])) {
             try {
+                $userid = $eventdata['userid'];
                 $clientdata = \local_o365\oauth2\clientdata::instance_from_oidc();
                 $httpclient = new \local_o365\httpclient();
                 $azureresource = \local_o365\rest\calendar::get_resource();
-                $token = \local_o365\oauth2\token::instance($eventdata['userid'], $azureresource, $clientdata, $httpclient);
+                $token = \local_o365\oauth2\token::instance($userid, $azureresource, $clientdata, $httpclient);
+
+                $userobject = $DB->get_record('local_o365_objects', ['type' => 'user', 'moodleid' => $eventdata['userid']]);
+                error_log("userobject".print_r($userobject));
+                if (empty($userobject)) {
+                    $resource = \local_o365\rest\azuread::get_resource();
+                    $sql = 'SELECT tok.*
+                              FROM {auth_oidc_token} tok
+                              JOIN {user} u
+                                   ON tok.username = u.username
+                             WHERE u.id = ? AND tok.resource = ?';
+                    $params = [$userid, $resource];
+                    $tokenrec = $DB->get_record_sql($sql, $params);
+                    if (empty($tokenrec)) {
+                        // No OIDC token for this user and resource - maybe not an Azure AD user.
+                        error_log("no oidc token".$sql.print_r($params));
+                        return false;
+                    }
+
+                    // Retrieve object id and from o365 userPrincipalName which may not match id in authentication plugin.
+                    // This will only executed once on the first connection.
+                    $token = \local_o365\oauth2\systemtoken::instance(null, $resource, $clientdata, $httpclient);
+                    $aadapiclient = new \local_o365\rest\azuread($token, $httpclient);
+                    $aaduserdata = $aadapiclient->get_user($tokenrec->oidcuniqid);
+                    // Create userobject if it does not exist.
+                    $now = time();
+                    $userobjectdata = (object)[
+                        'type' => 'user',
+                        'subtype' => '',
+                        'objectid' => $aaduserdata['objectId'],
+                        'o365name' => $aaduserdata['userPrincipalName'],
+                        'moodleid' => $userid,
+                        'timecreated' => $now,
+                        'timemodified' => $now,
+                    ];
+                    $userobjectdata->id = $DB->insert_record('local_o365_objects', $userobjectdata);
+                }
+
                 return true;
             } catch (\Exception $e) {
                 \local_o365\utils::debug($e->getMessage(), 'handle_oidc_user_connected', $e);
@@ -197,6 +236,22 @@ class observers {
 
             $updateduser = new \stdClass;
             $updateduser = \local_o365\feature\usersync\main::apply_configured_fieldmap($aaduserdata, $updateduser, $eventtype);
+
+            $userobject = $DB->get_record('local_o365_objects', ['type' => 'user', 'moodleid' => $userid]);
+            if (empty($userobject)) {
+                // Create userobject if it does not exist.
+                $now = time();
+                $userobjectdata = (object)[
+                    'type' => 'user',
+                    'subtype' => '',
+                    'objectid' => $aaduserdata['objectId'],
+                    'o365name' => $aaduserdata['userPrincipalName'],
+                    'moodleid' => $userid,
+                    'timecreated' => $now,
+                    'timemodified' => $now,
+                ];
+                $userobjectdata->id = $DB->insert_record('local_o365_objects', $userobjectdata);
+            }
 
             if (!empty($updateduser)) {
                 $updateduser->id = $userid;
