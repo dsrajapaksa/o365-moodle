@@ -293,7 +293,7 @@ class main {
      * @return \stdClass An object representing the created Moodle user.
      */
     public function create_user_from_aaddata($aaddata) {
-        global $CFG;
+        global $CFG, $DB;
 
         require_once($CFG->dirroot.'/user/profile/lib.php');
         require_once($CFG->dirroot.'/user/lib.php');
@@ -354,6 +354,24 @@ class main {
         }
         // Set the password.
         update_internal_user_password($user, $password);
+
+        // Add o365 object.
+        if (\local_o365\rest\unified::is_configured()) {
+            $userobjectid = $aaddata->id;
+        } else {
+            $userobjectid = $aaddata->objectId;
+        }
+        $now = time();
+        $userobjectdata = (object)[
+            'type' => 'user',
+            'subtype' => '',
+            'objectid' => $userobjectid,
+            'o365name' => $aaddata->userPrincipalName,
+            'moodleid' => $newuser->id,
+            'timecreated' => $now,
+            'timemodified' => $now,
+        ];
+        $userobjectdata->id = $DB->insert_record('local_o365_objects', $userobjectdata);
 
         // Trigger event.
         \core\event\user_created::create_from_userid($newuser->id)->trigger();
@@ -502,6 +520,25 @@ class main {
                         }
                     } catch (\Exception $e) {
                         $this->mtrace('Could not assign profile photo to user "'.$user['userPrincipalName'].'" Reason: '.$e->getMessage());
+                    }
+                }
+
+                if (!empty($existinguser->muserid) && !empty($userobjectid)) {
+                    $userobject = $DB->get_record('local_o365_objects', ['type' => 'user', 'moodleid' => $existinguser->muserid]);
+                    if (empty($userobject)) {
+                        mtrace('Adding o365 object record for user.');
+                        // Create userobject if it does not exist.
+                        $now = time();
+                        $userobjectdata = (object)[
+                            'type' => 'user',
+                            'subtype' => '',
+                            'objectid' => $userobjectid,
+                            'o365name' => $user['userPrincipalName'],
+                            'moodleid' => $existinguser->muserid,
+                            'timecreated' => $now,
+                            'timemodified' => $now,
+                        ];
+                        $userobjectdata->id = $DB->insert_record('local_o365_objects', $userobjectdata);
                     }
                 }
 
