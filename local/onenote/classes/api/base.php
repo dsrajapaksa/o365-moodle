@@ -746,6 +746,19 @@ abstract class base {
                 try {
                     $page = $this->apicall('get', '/pages/'.$pagerecord->$requestedpageidfield);
                     $page = $this->process_apicall_response($page, ['links' => null]);
+
+                    // If this user is a teacher and they are viewing a student's submission. Check if the student's OneNote
+                    // page was modified after the teacher last viewed the submission.
+                    if ($isteacher && 'submission_teacher_page_id' == $requestedpageidfield) {
+
+                        // Delete Teacher's OneNote copy if the student's OneNote time last modified date is greater than the teacher's.
+                        if (isset($page['lastModifiedTime']) && strtotime($page['lastModifiedTime']) < $pagerecord->student_lastmodified) {
+
+                            $this->apicall('delete', '/pages/'.$pagerecord->$requestedpageidfield);
+                            $page = null;
+                        }
+                    }
+
                     if (isset($page['links']['oneNoteWebUrl']) && isset($page['links']['oneNoteWebUrl']['href'])) {
                         // We have a record and the page exists in OneNote.
                         return $page['links']['oneNoteWebUrl']['href'];
@@ -803,6 +816,21 @@ abstract class base {
 
         // Update page id.
         $pagerecord->$requestedpageidfield = $response->id;
+        // If this user is a teacher and viewing a submission, add a timestamp for the new
+        // OneNote page.
+        if ($isteacher && 'submission_teacher_page_id' == $requestedpageidfield) {
+            // Format the lastModifiedTime as a newly created OneNote page has a datetime format of
+            // YYYY-MM-DDTHH:MM:ss.sssssssZ.  The date time is formatted to YYYY-MM-DDTHH:MM:ssZ then
+            // converted into a timestamp.
+            $lastviewed = $response->lastModifiedTime;
+            $pos = strpos($lastviewed, '.');
+            if (false !== $pos) {
+                $lastviewed = substr($lastviewed, 0, $pos+3);
+                $lastviewed = str_replace('.', ':', $lastviewed);
+                $lastviewed .= 'Z';
+            }
+            $pagerecord->teacher_lastviewed = strtotime($lastviewed);
+        }
         $DB->update_record('onenote_assign_pages', $pagerecord);
 
         return $response->links->oneNoteWebUrl->href;
@@ -1294,5 +1322,20 @@ abstract class base {
                 $span->setAttribute('style', str_replace('font-size:12px', 'font-size:10.5pt', $style));
             }
         }
+    }
+
+    /**
+     * Retrieve the a OneNote page metadata.
+     * @param string $pageid The OneNote page id.
+     * @return object The page metadata.
+     */
+    public function get_page_metadata($pageid) {
+        try {
+            $page = $this->apicall('get', '/pages/'.$pageid);
+        } catch (\Exception $e) {
+            $debugdata = ['pageid' => $pageid, 'e' => $e];
+            \local_onenote\utils::debug('Error getting page', 'onenote\api\get_page', $debugdata);
+        }
+        return $page;
     }
 }
